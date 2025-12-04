@@ -7,7 +7,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 from openpyxl import load_workbook
 import numpy as np
 
-import cedars_utils
 import ast
 
 import requests

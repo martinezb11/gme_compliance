@@ -20,13 +20,49 @@ from datetime import datetime, timedelta
 from openpyxl import load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+# Configure the logger
+logging.basicConfig(
+    level=logging.DEBUG,  # Log at DEBUG level
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),  # Log to a file
+        logging.StreamHandler()          # Log to console as well
+    ]
+)
+
+# Redirect print to the logging module
+class LoggerWriter(object):
+    def __init__(self, level):
+        self.level = level
+
+    def write(self, message):
+        if message.strip():  # Ignore empty messages (like newlines)
+            self.level(message)
+
+    def flush(self):
+        pass
 
 current_directory = os.getcwd()
 
-
+# Redirect stdout to log to the console and the file
+sys.stdout = LoggerWriter(logging.info)
+sys.stderr = LoggerWriter(logging.error)
 print("#############################################################################################################################################################")
 
 today = pd.Timestamp.today()
+
+try:
+    # Works when running as a .py script
+    current_directory = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Fallback for notebooks or interactive shells
+    current_directory = os.getcwd()
+
+#BASE_DIR = Path(__file__).resolve().parent
+
+#folder_path = Path(
+#    os.environ.get("FOLDER_PATH_gme_compliance", BASE_DIR)
+#)
 
 folder_path = os.environ["FOLDER_PATH_gme_compliance"]
 
@@ -35,6 +71,7 @@ old_file_folder = 'past_lists'
 old_file_folder_path = os.path.join(folder_path, old_file_folder)
 
 # Load Excel files into a DataFrame
+
 
 active_file_name = 'active.xlsx'
 hours_file_name = 'hours.xlsx'
@@ -45,10 +82,12 @@ hours_file_path = os.path.join(folder_path, hours_file_name)
 active = pd.read_excel(active_file_path)
 hours = pd.read_excel(hours_file_path)
 
+
 # load in directors info
 pd_list_file_name = 'PD_and_PA_report_list.xlsx'
 pd_list_file_path = os.path.join(folder_path, pd_list_file_name)
 pd_list = pd.read_excel(pd_list_file_path)
+
 
 
 # generating new active file, move old into "past" folder
@@ -87,6 +126,7 @@ dst_file = os.path.join(target_folder, new_file_name)
 # Move the file
 shutil.move(src_file, dst_file)
 print(f"Moved file to: {dst_file}")
+
 
 hours[['Trainee Last Name', 'Trainee First Name']] = hours['Person'].str.split(',', n=1, expand=True)
 
@@ -173,16 +213,23 @@ start_of_last_week = start_of_last_week.replace(hour=0, minute=0, second=0, micr
 end_of_last_week = end_of_last_week.replace(hour=23, minute=59, second=0, microsecond=0)      # Saturday 11:59 PM
 
 
-# Filter rows between end and start of week
-mask = (hours['Actual Start'] >= start_of_last_week) & (hours['Actual Start'] <= end_of_last_week)
-df_last_week = hours.loc[mask].copy() 
-resQ = df_last_week[df_last_week['Work Type']=='ResQ Working']
 
-df_last_week['In Violation'] = df_last_week['In Violation'].str.strip().str.lower()
+# Filter rows between end and start of week
+mask = (hours['Actual End'] >= start_of_last_week) & (hours['Actual Start'] <= end_of_last_week)
+df_last_week = hours.loc[mask].copy() 
+
+#use different week for resQ and violations, we don't need to check for cross over times
+mask_non_hours = (hours['Actual Start'] >= start_of_last_week) & (hours['Actual Start'] <= end_of_last_week)
+df_last_week_non_hours = hours.loc[mask_non_hours].copy() 
+
+
+resQ = df_last_week_non_hours[df_last_week_non_hours['Work Type']=='ResQ Working']
+
+df_last_week_non_hours['In Violation'] = df_last_week_non_hours['In Violation'].str.strip().str.lower()
 
 valid_yes = ['yes', 'y']
 
-violations = df_last_week[df_last_week['In Violation'].isin(valid_yes)]
+violations = df_last_week_non_hours[df_last_week_non_hours['In Violation'].isin(valid_yes)]
 
 #missing_hours
 unique_emails_hours_entry = df_last_week["Trainee Email"].unique().tolist()
@@ -232,9 +279,9 @@ days_worked = (
       .reset_index(name='Days Worked')
 )
 
-less_than_5 = days_worked[days_worked['Days Worked'] < 5]
+less_than_4 = days_worked[days_worked['Days Worked'] < 4]
 
-df_filtered = df_last_week[df_last_week['Trainee Email'].isin(less_than_5['Trainee Email'])]
+df_filtered = df_last_week[df_last_week['Trainee Email'].isin(less_than_4['Trainee Email'])]
 
 df_filtered = df_filtered.drop(columns= 'Shift Date')
 
@@ -248,7 +295,10 @@ def expand_shift_days(row):
     return pd.date_range(start, end, freq='D').date
 
 df_last_week['Days Covered'] = df_last_week.apply(expand_shift_days, axis=1)
-df_days = df_last_week.explode('Days Covered')
+df_days_all = df_last_week.explode('Days Covered')
+
+#need to remove days that are being covered outside of week due to crossover shifts
+df_days = df_days_all[df_days_all['Days Covered']>= start_of_last_week.date()]
 
 days_worked = (
     df_days.groupby('Trainee Email')['Days Covered']
@@ -256,10 +306,10 @@ days_worked = (
            .reset_index(name='Days Worked')
 )
 
-less_than_5 = days_worked[days_worked['Days Worked'] < 5]
+less_than_4 = days_worked[days_worked['Days Worked'] < 4]
 
 df_filtered = df_last_week[
-    df_last_week['Trainee Email'].isin(less_than_5['Trainee Email'])
+    df_last_week['Trainee Email'].isin(less_than_4['Trainee Email'])
 ]
 
 df_filtered_unique = df_filtered.drop_duplicates(
@@ -306,15 +356,15 @@ consolidated_df = table.groupby(id_cols, as_index=False).agg(
 columns_to_use = ['Program Admin Email','Program Director First Name', 'Program Director Last Name', 'Program Director Email', 'Program']
 consolidated_df1 = consolidated_df.merge(pd_list[columns_to_use], 
                                          on=["Program Admin Email","Program"], how="left")
-#remove program that do not have "ACGME" in title
-consolidated_df1 = consolidated_df1[consolidated_df1['Program'].str.contains('ACGME')]
+
 # remove test cases from jeffrey.mckelvey@cshs.org	
 consolidated_df1 = consolidated_df1[consolidated_df1['Trainee Email']!='jeffrey.mckelvey@cshs.org']
 # Added filter for Pilot Programs
 pilots = ['NEUROSURG-Neurological Surgery-ACGME', 'Imaging-Diagnostic Radiology-ACGME', 'MED-Pulmonary Disease & Critical Care Medicine-ACGME',
           'RAD-Radiation Oncology-ACGME', 'PEDS-Pediatric Medicine-ACGME', 'Surgery-Advanced GI MIS/Bariatric', 'MED-Hospice & Palliative Care Medicine-ACGME',
-          'OB/GYN-Obstetrics & Gynecology-ACGME', 'MED-Rheumatology-ACGME']
+          'OB/GYN-Obstetrics & Gynecology-ACGME', 'MED-Rheumatology-ACGME', 'MED-Rheumatology-Research']
 consolidated_df1 = consolidated_df1[consolidated_df1['Program'].isin(pilots)]
+
 
 
 # Load Excel files into a DataFrame
@@ -367,6 +417,7 @@ full_summary = '\n'.join(qc_df['SummaryLine'].astype(str))
 # Optionally, save it back to Excel in a new column or a single cell
 # For example, create a new row with the concatenated summary
 summary_df = pd.DataFrame({'FullSummary': [full_summary]})
+
 
 compliance_list_name = 'weekly_compliance_email_list.xlsx'
 compliance_list_location = os.path.join(folder_path, compliance_list_name)

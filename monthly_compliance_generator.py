@@ -15,7 +15,9 @@ old_file_folder = 'past_lists'
 old_file_folder_path = os.path.join(folder_path, old_file_folder)
 
 PILOT_ONLY = True
-PILOTS = ['NEUROSURG-Neurological Surgery-ACGME', 'Imaging-Diagnostic Radiology-ACGME']
+PILOTS = ['NEUROSURG-Neurological Surgery-ACGME', 'Imaging-Diagnostic Radiology-ACGME', 'MED-Pulmonary Disease & Critical Care Medicine-ACGME',
+          'RAD-Radiation Oncology-ACGME', 'PEDS-Pediatric Medicine-ACGME', 'Surgery-Advanced GI MIS/Bariatric', 'MED-Hospice & Palliative Care Medicine-ACGME',
+          'OB/GYN-Obstetrics & Gynecology-ACGME', 'MED-Rheumatology-ACGME', 'MED-Rheumatology-Research']
 OUTPUT_PREFIX = "monthly_compliance_email_list"
 
 HOURS_COLS_NEW = ["Person's National Provider Identifier", 'Person', 'Status', 'Program',
@@ -92,33 +94,36 @@ def prev_month_range(reference_date=None):
 
 def generate_full_weeks_for_month(start_month, end_month):
     """
-    Generates weekly periods for the month of interest.
-    Keeps weeks that END inside the month.
-    Skips weeks that end in the next month.
-    """
+    Generates weekly periods that OVERLAP the target month.
 
-    # Example: start_month = datetime(2025, 11, 1)
-    # end_month   = datetime(2025, 11, 30)
+    Includes:
+    - weeks starting before the month
+    - weeks ending after the month
+    - partial weeks at beginning or end
+
+    Excludes:
+    - weeks fully outside the month
+    """
 
     month_start = start_month.replace(day=1)
     month_end = end_month
 
-    # Find first Sunday on or before month_start
+    # Find the Sunday on or before month_start
     first_sunday = month_start - timedelta(days=(month_start.weekday() + 1) % 7)
 
     weeks = []
     current_start = first_sunday
 
     while current_start <= month_end:
-        current_end = current_start + timedelta(days=6)
+        current_end = current_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
-        # --- KEY RULE: Skip if week ends outside target month ---
-        if current_end.month != start_month.month:
-            break
-
-        # Format week label
-        week_label = f"{current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}"
-        weeks.append((current_start, current_end, week_label))
+        # ✅ KEEP WEEK IF IT OVERLAPS THE MONTH
+        if current_start <= month_end and current_end >= month_start:
+            week_label = (
+                f"{current_start.strftime('%Y-%m-%d')} "
+                f"to {current_end.strftime('%Y-%m-%d')}"
+            )
+            weeks.append((current_start, current_end, week_label))
 
         current_start += timedelta(days=7)
 
@@ -136,6 +141,9 @@ def process_month(active, hours, pd_list, start_month, end_month):
     violations_map = {}
     resq_map = {}
     missing_weeks_map = {}
+
+    def in_target_month(dt):
+        return pd.notna(dt) and start_month <= dt <= end_month
 
     # Pre-fill trainee info from active
     for _, row in active.iterrows():
@@ -156,7 +164,10 @@ def process_month(active, hours, pd_list, start_month, end_month):
         hours_week = hours.loc[mask].copy()
 
         # RESQ detection
-        resq_entries = hours_week[hours_week['Work Type'].str.contains('ResQ', na=False, case=False)]
+        resq_entries = hours_week[
+            hours_week['Work Type'].str.contains('ResQ', na=False, case=False)
+            & hours_week['Actual Start'].apply(in_target_month)
+        ]
         for _, r in resq_entries.iterrows():
             email = r.get('Trainee Email')
             if pd.isna(email): continue
@@ -173,7 +184,10 @@ def process_month(active, hours, pd_list, start_month, end_month):
         if 'In Violation' in hours_week.columns:
             inv_series = hours_week['In Violation'].astype(str).str.strip().str.lower()
             valid_yes = inv_series.isin(['yes','y'])
-            violations_entries = hours_week.loc[valid_yes]
+            violations_entries = hours_week.loc[
+                valid_yes & hours_week['Actual Start'].apply(in_target_month)
+            ]
+
             for _, v in violations_entries.iterrows():
                 email = v.get('Trainee Email')
                 if pd.isna(email): continue
@@ -193,7 +207,7 @@ def process_month(active, hours, pd_list, start_month, end_month):
         for email in no_entry_emails:
             missing_weeks_map.setdefault(email, set()).add(week_label)
 
-        # Partial coverage (<5 days)
+        # Partial coverage (<4 days)
         if not hours_week.empty:
             def expand_shift_days(row):
                 s, e = row['Actual Start'], row['Actual End']
@@ -204,7 +218,7 @@ def process_month(active, hours, pd_list, start_month, end_month):
             hours_week['Days Covered'] = hours_week.apply(expand_shift_days, axis=1)
             df_days = hours_week.explode('Days Covered')
             days_worked = df_days.groupby('Trainee Email')['Days Covered'].nunique().reset_index()
-            partials = days_worked[days_worked['Days Covered'] < 5]
+            partials = days_worked[days_worked['Days Covered'] < 4]
             for _, p in partials.iterrows():
                 email = p['Trainee Email']
                 missing_weeks_map.setdefault(email, set()).add(week_label)
